@@ -17,7 +17,7 @@ engine.name = "PolyPerc"
 local g = grid.connect()
 local MusicUtil = require "musicutil"
 
--- ─── state ──────────────────────────────────────────────────────────────────
+-- ─── state ───────────────────────────────────────────────────────────────────────
 local SEQ_LEN = 16
 local seq = {}          -- {note, vel, slide, accent, active}
 local step = 1
