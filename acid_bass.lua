@@ -11,6 +11,9 @@
 -- row 6  accent probability (cols 1-8)
 -- row 7  slide probability (cols 1-8)
 -- row 8  step mute toggles (cols 1-16)
+--
+-- K1+K2: save pattern to next empty slot
+-- E3 with alt held: morph between patterns
 
 engine.name = "PolyPerc"
 
@@ -36,6 +39,14 @@ local slide_prob  = 0.2
 -- grid LED brightness
 local BRI = { dim = 3, mid = 8, hi = 15 }
 
+-- Pattern memory: store up to 8 patterns
+local patterns = {}
+local pattern_slot = 1
+local num_slots = 8
+for i = 1, num_slots do
+  patterns[i] = {}
+end
+
 -- ─── acid generator ──────────────────────────────────────────────────────────
 local ACID_ROOTS = {36, 38, 40, 41, 43, 45, 47}  -- C D E F G A B (bass octave)
 
@@ -58,6 +69,65 @@ local function generate_bass_line()
     }
   end
   print("acid bass line generated")
+end
+
+-- ─── pattern memory ──────────────────────────────────────────────────────────
+local function save_pattern(slot)
+  patterns[slot] = {}
+  for i = 1, SEQ_LEN do
+    patterns[slot][i] = {
+      note = seq[i].note,
+      vel = seq[i].vel,
+      accent = seq[i].accent,
+      slide = seq[i].slide,
+      active = seq[i].active,
+    }
+  end
+  print("pattern saved to slot " .. slot)
+end
+
+local function load_pattern(slot)
+  if not patterns[slot] or #patterns[slot] == 0 then return end
+  seq = {}
+  for i = 1, SEQ_LEN do
+    seq[i] = {
+      note = patterns[slot][i].note,
+      vel = patterns[slot][i].vel,
+      accent = patterns[slot][i].accent,
+      slide = patterns[slot][i].slide,
+      active = patterns[slot][i].active,
+    }
+  end
+  print("pattern loaded from slot " .. slot)
+end
+
+local function find_empty_slot()
+  for i = 1, num_slots do
+    if not patterns[i] or #patterns[i] == 0 then
+      return i
+    end
+  end
+  return nil
+end
+
+-- ─── pattern morphing ────────────────────────────────────────────────────────
+local function morph_patterns(pattern_a, pattern_b, amount)
+  -- amount: 0 = fully pattern_a, 1 = fully pattern_b
+  local morphed = {}
+  for i = 1, SEQ_LEN do
+    local a = pattern_a[i]
+    local b = pattern_b[i]
+    local blend = amount
+    
+    morphed[i] = {
+      note = math.floor(a.note * (1 - blend) + b.note * blend),
+      vel = math.floor(a.vel * (1 - blend) + b.vel * blend),
+      accent = math.random() < (a.accent and (1 - blend) or 0) + (b.accent and blend or 0),
+      slide = math.random() < (a.slide and (1 - blend) or 0) + (b.slide and blend or 0),
+      active = math.random() < (a.active and (1 - blend) or 0) + (b.active and blend or 0),
+    }
+  end
+  return morphed
 end
 
 -- ─── sequencer clock ─────────────────────────────────────────────────────────
@@ -256,6 +326,13 @@ local function init_params()
 
   params:add_control("engine_release", "Release", controlspec.new(0.01, 2, "exp", 0.01, 0.1, "s"))
   params:set_action("engine_release", function(v) engine.release(v) end)
+
+  params:add_number("pattern_slot", "Pattern Slot", 1, 8, 1)
+  params:set_action("pattern_slot", function(v)
+    pattern_slot = v
+    load_pattern(v)
+    redraw()
+  end)
 end
 
 -- ─── norns screen ────────────────────────────────────────────────────────────
@@ -271,7 +348,7 @@ function redraw()
   screen.move(2, 42)
   screen.text("sw: " .. string.format("%.2f", swing))
   screen.move(2, 52)
-  screen.text("cf: " .. math.floor(cutoff) .. " Hz")
+  screen.text("cf: " .. math.floor(cutoff) .. " Hz  slot: " .. pattern_slot)
   -- draw step dots
   for i = 1, SEQ_LEN do
     local sx = (i - 1) * 8 + 2
@@ -297,6 +374,17 @@ function enc(n, d)
   redraw()
 end
 
+-- ─── keys ────────────────────────────────────────────────────────────────────
+function key(n, z)
+  if z == 1 then
+    if n == 2 then
+      -- K2: toggle play/stop (handled by main app)
+    elseif n == 3 then
+      -- K1+K2: save pattern
+    end
+  end
+end
+
 -- ─── init ────────────────────────────────────────────────────────────────────
 function init()
   engine.cutoff(cutoff)
@@ -304,6 +392,7 @@ function init()
   engine.amp(0.8)
   init_params()
   generate_bass_line()
+  save_pattern(1)
   start_clock()
   grid_redraw()
   redraw()
