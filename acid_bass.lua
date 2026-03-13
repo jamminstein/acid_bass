@@ -47,6 +47,18 @@ for i = 1, num_slots do
   patterns[i] = {}
 end
 
+-- Screen state
+local beat_phase = 0        -- 0.0–1.0 for pulse animation
+local popup_param = nil     -- current param in popup (from enc)
+local popup_val = nil       -- value to display
+local popup_time = 0        -- time remaining for popup (0 = hidden)
+local screen_clock_running = false
+
+-- Pattern morphing state
+local morph_active = false
+local morph_target_slot = nil
+local morph_amount = 0      -- 0.0–1.0
+
 -- ─── acid generator ──────────────────────────────────────────────────────────
 local ACID_ROOTS = {36, 38, 40, 41, 43, 45, 47}  -- C D E F G A B (bass octave)
 
@@ -148,6 +160,7 @@ local function play_step()
     engine.hz(hz)
   end
   step = (step % SEQ_LEN) + 1
+  beat_phase = 0  -- reset pulse at step
   redraw()
   grid_redraw()
 end
@@ -335,41 +348,260 @@ local function init_params()
   end)
 end
 
+-- ─── screen drawing zones ────────────────────────────────────────────────────
+-- Calculate normalized note position (0.0–1.0 vertically based on note range)
+local function note_to_y(note)
+  if not note or note == 0 then return nil end
+  -- Map note range: 24 (low) to 72 (high) → normalized position
+  local min_note = 24
+  local max_note = 72
+  return util.clamp((note - min_note) / (max_note - min_note), 0, 1)
+end
+
+-- Draw status strip (y 0-8)
+local function draw_status_strip()
+  screen.level(4)
+  screen.font_size(8)
+  screen.move(2, 7)
+  screen.text("ACID")
+  
+  screen.level(8)
+  screen.move(114, 7)
+  screen.text("P" .. pattern_slot)
+  
+  -- Beat pulse dot at x=124
+  local pulse_brightness = 4 + math.floor(beat_phase * 11)
+  screen.level(pulse_brightness)
+  screen.circle(124, 4, 2)
+  screen.fill()
+end
+
+-- Draw live zone (y 9-52): 16-step contour with connections
+local function draw_live_zone()
+  local zone_top = 9
+  local zone_height = 44
+  local zone_left = 2
+  local zone_width = 126
+  
+  -- Step width
+  local step_width = zone_width / SEQ_LEN
+  
+  -- Draw morph target pattern if active
+  if morph_active and morph_target_slot and patterns[morph_target_slot] then
+    local target = patterns[morph_target_slot]
+    local morph_bri = math.floor(3 + morph_amount * 2)
+    screen.level(morph_bri)
+    
+    -- Draw target contour
+    local prev_x, prev_y = nil, nil
+    for i = 1, SEQ_LEN do
+      local step_note = target[i] and target[i].note or nil
+      local norm_y = note_to_y(step_note)
+      
+      if norm_y then
+        local x = zone_left + (i - 0.5) * step_width
+        local y = zone_top + zone_height - (norm_y * zone_height)
+        
+        if prev_x and prev_y then
+          screen.aa(1)
+          screen.move(prev_x, prev_y)
+          screen.line(x, y)
+          screen.stroke()
+        end
+        prev_x, prev_y = x, y
+      else
+        prev_x, prev_y = nil, nil
+      end
+    end
+  end
+  
+  -- Draw current pattern contour
+  local prev_x, prev_y = nil, nil
+  
+  for i = 1, SEQ_LEN do
+    local s = seq[i]
+    if not s then goto continue_live end
+    
+    local norm_y = note_to_y(s.note)
+    if not norm_y then
+      prev_x, prev_y = nil, nil
+      goto continue_live
+    end
+    
+    local x = zone_left + (i - 0.5) * step_width
+    local y = zone_top + zone_height - (norm_y * zone_height)
+    
+    -- Draw connecting line from previous step
+    if prev_x and prev_y then
+      screen.aa(1)
+      if s.slide then
+        -- Slide line: brighter
+        screen.level(10)
+      else
+        -- Regular line: medium brightness
+        screen.level(8)
+      end
+      screen.move(prev_x, prev_y)
+      screen.line(x, y)
+      screen.stroke()
+    end
+    
+    -- Draw step circle
+    if s.active then
+      if i == step then
+        -- Active, current step: brightest filled circle
+        screen.level(15)
+        screen.circle(x, y, 3)
+        screen.fill()
+      elseif s.accent then
+        -- Active, accented: larger brighter circle
+        screen.level(15)
+        screen.circle(x, y, 2.5)
+        screen.fill()
+      else
+        -- Active, normal: regular filled circle
+        screen.level(12)
+        screen.circle(x, y, 2)
+        screen.fill()
+      end
+    else
+      -- Inactive: hollow circle at dim level
+      screen.level(4)
+      screen.circle(x, y, 1.5)
+      screen.stroke()
+    end
+    
+    prev_x, prev_y = x, y
+    
+    ::continue_live::
+  end
+  
+  -- Playhead thin vertical line at current step
+  if step >= 1 and step <= SEQ_LEN then
+    local ph_x = zone_left + (step - 0.5) * step_width
+    screen.level(15)
+    screen.move(ph_x, zone_top)
+    screen.line(ph_x, zone_top + zone_height)
+    screen.stroke()
+    
+    -- Thin background line at level 3
+    screen.level(3)
+    screen.move(ph_x - 1, zone_top)
+    screen.line(ph_x - 1, zone_top + zone_height)
+    screen.stroke()
+  end
+end
+
+-- Draw context bar (y 53-58)
+local function draw_context_bar()
+  screen.level(6)
+  screen.font_size(8)
+  
+  -- DENS + density value
+  screen.move(2, 58)
+  screen.text("DENS " .. string.format("%.2f", 1.0))  -- could add density param later
+  
+  -- Cutoff value
+  screen.move(40, 58)
+  screen.text("CF " .. math.floor(cutoff) .. "Hz")
+  
+  -- Current pattern slot
+  screen.level(8)
+  screen.move(80, 58)
+  screen.text("P" .. pattern_slot)
+  
+  -- Morph target if active
+  if morph_active and morph_target_slot then
+    screen.level(4)
+    screen.move(100, 58)
+    screen.text("→P" .. morph_target_slot)
+  end
+end
+
+-- Draw transient parameter popup (0.8s)
+local function draw_popup()
+  if popup_time <= 0 or not popup_param then return end
+  
+  -- Popup box background
+  screen.level(1)
+  screen.rect(30, 15, 70, 30)
+  screen.fill()
+  
+  -- Border
+  screen.level(15)
+  screen.rect(30, 15, 70, 30)
+  screen.stroke()
+  
+  -- Param name
+  screen.level(15)
+  screen.font_size(8)
+  screen.move(35, 25)
+  screen.text(popup_param)
+  
+  -- Value
+  screen.level(15)
+  screen.font_size(10)
+  screen.move(35, 40)
+  screen.text(popup_val or "")
+end
+
 -- ─── norns screen ────────────────────────────────────────────────────────────
 function redraw()
   screen.clear()
-  screen.font_size(8)
-  screen.move(2, 10)
-  screen.text("ACID BASS")
-  screen.move(2, 22)
-  screen.text("bpm: " .. bpm)
-  screen.move(2, 32)
-  screen.text("oct: " .. octave .. "  gate: " .. string.format("%.2f", gate_len))
-  screen.move(2, 42)
-  screen.text("sw: " .. string.format("%.2f", swing))
-  screen.move(2, 52)
-  screen.text("cf: " .. math.floor(cutoff) .. " Hz  slot: " .. pattern_slot)
-  -- draw step dots
-  for i = 1, SEQ_LEN do
-    local sx = (i - 1) * 8 + 2
-    local sy = 62
-    if seq[i] and seq[i].active then
-      screen.level(i == step and 15 or (seq[i].accent and 8 or 4))
-      screen.rect(sx, sy - 2, 6, 3)
-      screen.fill()
-    end
-  end
+  screen.aa(1)
+  
+  draw_status_strip()
+  draw_live_zone()
+  draw_context_bar()
+  draw_popup()
+  
   screen.update()
+end
+
+-- ─── screen update clock (10fps) ──────────────────────────────────────────────
+local function start_screen_clock()
+  if screen_clock_running then return end
+  screen_clock_running = true
+  
+  clock.run(function()
+    while screen_clock_running do
+      -- Advance beat phase
+      beat_phase = beat_phase + 0.1
+      if beat_phase > 1.0 then beat_phase = 0 end
+      
+      -- Decay popup timer
+      if popup_time > 0 then
+        popup_time = popup_time - 0.1
+        if popup_time <= 0 then
+          popup_time = 0
+          popup_param = nil
+          popup_val = nil
+        end
+      end
+      
+      redraw()
+      clock.sleep(0.1)
+    end
+  end)
 end
 
 -- ─── encoders ────────────────────────────────────────────────────────────────
 function enc(n, d)
   if n == 1 then
     params:delta("bpm", d)
+    popup_param = "BPM"
+    popup_val = tostring(bpm)
+    popup_time = 0.8
   elseif n == 2 then
     params:delta("engine_cutoff", d * 50)
+    popup_param = "CUTOFF"
+    popup_val = math.floor(cutoff) .. "Hz"
+    popup_time = 0.8
   elseif n == 3 then
     params:delta("engine_release", d * 0.01)
+    popup_param = "RELEASE"
+    popup_val = string.format("%.3f", params:get("engine_release")) .. "s"
+    popup_time = 0.8
   end
   redraw()
 end
@@ -394,10 +626,12 @@ function init()
   generate_bass_line()
   save_pattern(1)
   start_clock()
+  start_screen_clock()
   grid_redraw()
   redraw()
 end
 
 function cleanup()
   if seq_clock then clock.cancel(seq_clock) end
+  screen_clock_running = false
 end
